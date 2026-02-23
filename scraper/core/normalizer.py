@@ -3,11 +3,95 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 from typing import Any, Dict
+
+
+def finalize_listing(listing: Dict[str, Any]) -> Dict[str, Any]:
+    # ... rapikan field2 dulu ...
+
+    # safety: images unique (opsional)
+    if isinstance(listing.get("images"), list):
+        listing["images"] = list(dict.fromkeys([x for x in listing["images"] if x]))
+
+    listing["content_hash"] = compute_content_hash(listing)
+    return listing
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _norm_text(s: Any) -> Any:
+    """Normalize whitespace for text fields."""
+    if not isinstance(s, str):
+        return s
+    s = s.replace("\xa0", " ")
+    s = s.strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _round_num(x: Any) -> Any:
+    """Make numeric values stable (avoid 2 vs 2.0 issues)."""
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, int):
+        return x
+    if isinstance(x, float):
+        # keep enough precision for prices/coords but avoid noise
+        return round(x, 6)
+    return x
+
+
+def _canonical(obj: Any) -> Any:
+    """
+    Recursively canonicalize dict/list/scalars so hashing is deterministic.
+    - dict keys sorted
+    - lists sorted when possible (for prices/images)
+    - text normalized
+    - numbers rounded
+    """
+    if obj is None:
+        return None
+
+    if isinstance(obj, dict):
+        # normalize keys + values
+        items = {}
+        for k, v in obj.items():
+            # keep keys as-is but normalize string keys spacing
+            kk = _norm_text(k) if isinstance(k, str) else k
+            items[kk] = _canonical(v)
+        # return as normal dict; json.dumps(sort_keys=True) will order keys
+        return items
+
+    if isinstance(obj, list):
+        canon_list = [_canonical(x) for x in obj]
+
+        # special: list of strings -> sort unique (images)
+        if all(isinstance(x, str) for x in canon_list):
+            uniq = list(dict.fromkeys([_norm_text(x) for x in canon_list if x]))
+            return sorted(uniq)
+
+        # special: list of dict prices -> sort by (period, currency, amount)
+        if all(isinstance(x, dict) for x in canon_list):
+            def _price_key(d: dict):
+                return (
+                    str(d.get("period") or ""),
+                    str(d.get("currency") or ""),
+                    float(d.get("amount") or 0.0),
+                )
+            # if looks like price dicts
+            if any("amount" in d or "period" in d for d in canon_list):
+                return sorted(canon_list, key=_price_key)
+
+        return canon_list
+
+    if isinstance(obj, str):
+        return _norm_text(obj)
+
+    # numbers / others
+    return _round_num(obj)
 
 
 def compute_content_hash(listing: Dict[str, Any]) -> str:
@@ -41,72 +125,7 @@ def compute_content_hash(listing: Dict[str, Any]) -> str:
         "broker_email": listing.get("broker_email"),
     }
 
+    stable = _canonical(stable)
+
     raw = json.dumps(stable, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def finalize_listing(listing: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Set timestamps, defaults, content_hash.
-    """
-    now = utc_now_iso()
-
-    listing.setdefault("status", "active")
-
-    if not listing.get("first_seen_at"):
-        listing["first_seen_at"] = now
-    listing["last_seen_at"] = now
-
-    listing["content_hash"] = compute_content_hash(listing)
-    return listing
-
-
-def merge_preview_into_detail(preview: Dict[str, Any], detail: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Merge list preview into detail result (lat/lon/area, price preview fallback, etc).
-    Keep detail as source-of-truth where available.
-    """
-    out = dict(detail)
-
-    # ensure source fields
-    out.setdefault("source", preview.get("source") or preview.get("source_key") or "unknown")
-    out.setdefault("source_listing_id", preview.get("source_listing_id"))
-    out.setdefault("source_url", preview.get("url") or out.get("source_url"))
-
-    # intent + property_type (preview can help)
-    if out.get("intent") in (None, "", "unknown"):
-        out["intent"] = preview.get("intent_preview") or out.get("intent") or "unknown"
-
-    # location merge
-    pv_loc = preview.get("location_preview") or {}
-    if pv_loc:
-        out_loc = out.get("location") or {}
-        # only fill missing
-        out_loc.setdefault("area", pv_loc.get("area"))
-        out_loc.setdefault("latitude", pv_loc.get("latitude"))
-        out_loc.setdefault("longitude", pv_loc.get("longitude"))
-        out["location"] = out_loc
-
-    # price fallback (kalau detail page kadang gak ada)
-    if out.get("price") is None and preview.get("price_preview") is not None:
-        out["price"] = {
-            "currency": "IDR",
-            "amount": float(preview["price_preview"]),
-            "period": "one_time",  # default; detail page akan override kalau tahu
-        }
-
-    # thumb → images fallback kalau detail belum ambil images
-    if (not out.get("images")) and preview.get("thumb"):
-        out["images"] = [preview["thumb"]]
-
-    # raw preview (optional)
-    out_raw = out.get("raw") or {}
-    out_raw.setdefault("preview", {})
-    out_raw["preview"].update({
-        "price_category_preview": preview.get("price_category_preview"),
-        "status_preview": preview.get("status_preview"),
-        "tenure_preview": preview.get("tenure_preview"),
-    })
-    out["raw"] = out_raw
-
-    return out
