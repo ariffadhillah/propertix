@@ -4,10 +4,77 @@ import requests
 import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-
+from urllib.parse import urlsplit
 # image parsing helpers
 
 BASE = "https://bali-home-immo.com"
+
+
+
+
+
+def parse_taxonomy_from_url(url: str) -> dict:
+    """
+    Extract intent / property_type / tenure / rent_period from BHI URL.
+    Example:
+    /for-sale/villa/leasehold/...
+    /for-rent/villa/monthly/...
+    """
+    if not url:
+        return {}
+
+    path = urlsplit(url).path.lower().strip("/")
+    parts = path.split("/")
+
+    out = {
+        "intent": None,
+        "property_type": None,
+        "tenure": None,
+        "rent_period": None,
+    }
+
+    for i, p in enumerate(parts):
+        if p == "for-sale":
+            out["intent"] = "sale"
+        elif p == "for-rent":
+            out["intent"] = "rent"
+
+    # find position of for-sale / for-rent
+    try:
+        idx = parts.index("for-sale")
+    except ValueError:
+        try:
+            idx = parts.index("for-rent")
+        except ValueError:
+            return out
+
+    # property type (usually next segment)
+    if idx + 1 < len(parts):
+        out["property_type"] = parts[idx + 1]
+
+    # next segment could be tenure OR rent period
+    if idx + 2 < len(parts):
+        token = parts[idx + 2]
+
+        if token in ("freehold", "leasehold"):
+            out["tenure"] = token
+
+        if token in ("daily", "nightly"):
+            out["rent_period"] = "day"
+        elif token in ("weekly", "week"):
+            out["rent_period"] = "week"
+        elif token in ("monthly", "month"):
+            out["rent_period"] = "month"
+        elif token in ("yearly", "year"):
+            out["rent_period"] = "year"
+
+    # sometimes tenure is next after subtype and area
+    if out["tenure"] is None:
+        for t in ("freehold", "leasehold"):
+            if t in parts:
+                out["tenure"] = t
+
+    return out
 
 
 # deskripsion
@@ -154,13 +221,22 @@ def extract_section_by_category(soup: BeautifulSoup, section_prefix: str) -> dic
             out[cat] = kv
     return out
 
+# def choose_primary_category(source_url: str) -> str:
+#     url = (source_url or "").lower()
+#     if "/for-sale/" in url or "/sale/" in url:
+#         return "freehold"  # fallback kalau freehold tidak ada, nanti kita fallback di code
+#     if "/rent/" in url:
+#         return "yearly"
+#     return "freehold"
+
 def choose_primary_category(source_url: str) -> str:
     url = (source_url or "").lower()
     if "/for-sale/" in url or "/sale/" in url:
-        return "freehold"  # fallback kalau freehold tidak ada, nanti kita fallback di code
-    if "/rent/" in url:
+        return "freehold"
+    if "/for-rent/" in url or "/rent/" in url:
         return "yearly"
     return "freehold"
+
 
 def pick_category_dict(all_by_cat: dict[str, dict[str, str]], preferred: str) -> tuple[str | None, dict[str, str]]:
     if not all_by_cat:
@@ -296,6 +372,7 @@ def extract_title(soup: BeautifulSoup) -> str | None:
     title = el.get_text(" ", strip=True)
     return title or None
 
+
 def parse_detail_page(item: Dict[str, Any]) -> Dict[str, Any]:
     url = item["url"]
 
@@ -303,10 +380,12 @@ def parse_detail_page(item: Dict[str, Any]) -> Dict[str, Any]:
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "lxml")
 
+    # --- taxonomy from URL (intent, property_type, tenure, rent_period)
+    taxonomy = parse_taxonomy_from_url(url)
+
     title = extract_title(soup)
     prices = extract_prices(soup)
     primary = choose_primary_price(prices, url)
-
 
     preferred_cat = choose_primary_category(url)
 
@@ -323,11 +402,9 @@ def parse_detail_page(item: Dict[str, Any]) -> Dict[str, Any]:
 
     bedrooms = _parse_number(indoor.get("bedroom", ""))
     bathrooms = _parse_number(indoor.get("bathroom", ""))
-    
-    images = extract_images(soup)
-    
-    description = extract_description(soup)
 
+    images = extract_images(soup)
+    description = extract_description(soup)
 
     def to_money(p: dict) -> dict:
         return {"currency": p["currency"], "amount": p["amount"], "period": p.get("period")}
@@ -337,21 +414,31 @@ def parse_detail_page(item: Dict[str, Any]) -> Dict[str, Any]:
         "source_url": url,
         "title": title,
         "description": description,
-        "intent": "unknown",
-        "property_type": "unknown",
+
+        # ✅ ambil dari taxonomy, fallback ke unknown
+        "intent": taxonomy.get("intent") or "unknown",
+        "property_type": taxonomy.get("property_type") or "unknown",
+        "tenure": taxonomy.get("tenure"),
+        "rent_period": taxonomy.get("rent_period"),
+
         "price": to_money(primary) if primary else None,
         "prices": [to_money(p) for p in prices],
+
         "bedrooms": bedrooms,
         "bathrooms": bathrooms,
         "land_size_sqm": land_size,
         "building_size_sqm": building_size,
-        "location": None,
+
+        "location": None,   # (nanti kita isi dari side-location / map embed)
         "images": images,
+
         "broker_name": None,
         "broker_phone": None,
         "broker_email": None,
+
         "raw": {
             "debug": {"fetched_url": url},
+            "url_taxonomy": taxonomy,
             "bhi_sections": {
                 "general_information": general_all,
                 "indoor": indoor_all,
@@ -366,43 +453,140 @@ def parse_detail_page(item: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
 
-    # source_key untuk site ini
-    # listing["reso"] = to_reso_listing(listing, source_key="bali-home-immo")
     return listing
 
 
+# def parse_detail_page(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
-   # return {
-    #     "source_listing_id": item["source_listing_id"],
-    #     "source_url": url,
-    #     "title": title,
-    #     "description": None,
-    #     "intent": "unknown",
-    #     "property_type": "unknown",
-    #     "price": to_money(primary) if primary else None,
-    #     "prices": [to_money(p) for p in prices],
-    #     "bedrooms": bedrooms,
-    #     "bathrooms": bathrooms,
-    #     "land_size_sqm": land_size,
-    #     "building_size_sqm": building_size,
-    #     "location": None,
-    #     "images": [],
-    #     "broker_name": None,
-    #     "broker_phone": None,
-    #     "broker_email": None,
-    #     "raw": {
-    #         "debug": {"fetched_url": url},
-    #         "bhi_sections": {
-    #             "general_information": general_all,
-    #             "indoor": indoor_all,
-    #             "outdoor": outdoor_all,
-    #             "facilities": fac_all,
-    #             "primary_category_used": {
-    #                 "preferred": preferred_cat,
-    #                 "general": gen_cat,
-    #                 "indoor": in_cat,
-    #             }
-    #         }
-    #     }
-    # }
+#     taxonomy = parse_taxonomy_from_url(listing.get("source_url"))
+#     if taxonomy.get("intent"):
+#         listing["intent"] = taxonomy["intent"]
+#     if taxonomy.get("property_type"):
+#         listing["property_type"] = taxonomy["property_type"]
+#     if taxonomy.get("tenure"):
+#         listing["tenure"] = taxonomy["tenure"]
+#     if taxonomy.get("rent_period"):
+#         listing["rent_period"] = taxonomy["rent_period"]
+#     # save raw breadcrumb for audit
+#     raw = listing.get("raw") or {}
+#     raw["url_taxonomy"] = taxonomy
+#     listing["raw"] = raw
+
+
+#     url = item["url"]
+#     r = requests.get(url, timeout=30)
+#     r.raise_for_status()
+#     soup = BeautifulSoup(r.text, "lxml")
+
+#     title = extract_title(soup)
+#     prices = extract_prices(soup)
+#     primary = choose_primary_price(prices, url)
+
+
+#     preferred_cat = choose_primary_category(url)
+
+#     general_all = extract_section_by_category(soup, "list-general-information")
+#     indoor_all  = extract_section_by_category(soup, "list-indoor")
+#     outdoor_all = extract_section_by_category(soup, "list-outdoor")
+#     fac_all     = extract_section_by_category(soup, "list-facilities")
+
+#     gen_cat, general = pick_category_dict(general_all, preferred_cat)
+#     in_cat, indoor   = pick_category_dict(indoor_all, preferred_cat)
+
+#     land_size = _parse_sqm(general.get("land size", ""))
+#     building_size = _parse_sqm(general.get("building size", ""))
+
+#     bedrooms = _parse_number(indoor.get("bedroom", ""))
+#     bathrooms = _parse_number(indoor.get("bathroom", ""))
+    
+#     images = extract_images(soup)
+    
+#     description = extract_description(soup)
+
+
+#     def to_money(p: dict) -> dict:
+#         return {"currency": p["currency"], "amount": p["amount"], "period": p.get("period")}
+    
+#     print(listing["intent"], listing["property_type"], listing.get("tenure"), listing.get("rent_period"))
+    
+#     listing = {
+#         "source_listing_id": item["source_listing_id"],
+#         "source_url": url,
+#         "title": title,
+#         "description": description,
+#         "intent": "unknown",
+#         "property_type": "unknown",
+#         "price": to_money(primary) if primary else None,
+#         "prices": [to_money(p) for p in prices],
+#         "bedrooms": bedrooms,
+#         "bathrooms": bathrooms,
+#         "land_size_sqm": land_size,
+#         "building_size_sqm": building_size,
+#         "location": None,
+#         "images": images,
+#         "broker_name": None,
+#         "broker_phone": None,
+#         "broker_email": None,
+#         "raw": {
+#             "debug": {"fetched_url": url},
+#             "bhi_sections": {
+#                 "general_information": general_all,
+#                 "indoor": indoor_all,
+#                 "outdoor": outdoor_all,
+#                 "facilities": fac_all,
+#                 "primary_category_used": {
+#                     "preferred": preferred_cat,
+#                     "general": gen_cat,
+#                     "indoor": in_cat,
+#                 }
+#             }
+#         }
+#     }
+
+#     # source_key untuk site ini
+#     # listing["reso"] = to_reso_listing(listing, source_key="bali-home-immo")
+#     return listing
+
+
+
+
+
+
+
+
+#    # return {
+#     #     "source_listing_id": item["source_listing_id"],
+#     #     "source_url": url,
+#     #     "title": title,
+#     #     "description": None,
+#     #     "intent": "unknown",
+#     #     "property_type": "unknown",
+#     #     "price": to_money(primary) if primary else None,
+#     #     "prices": [to_money(p) for p in prices],
+#     #     "bedrooms": bedrooms,
+#     #     "bathrooms": bathrooms,
+#     #     "land_size_sqm": land_size,
+#     #     "building_size_sqm": building_size,
+#     #     "location": None,
+#     #     "images": [],
+#     #     "broker_name": None,
+#     #     "broker_phone": None,
+#     #     "broker_email": None,
+#     #     "raw": {
+#     #         "debug": {"fetched_url": url},
+#     #         "bhi_sections": {
+#     #             "general_information": general_all,
+#     #             "indoor": indoor_all,
+#     #             "outdoor": outdoor_all,
+#     #             "facilities": fac_all,
+#     #             "primary_category_used": {
+#     #                 "preferred": preferred_cat,
+#     #                 "general": gen_cat,
+#     #                 "indoor": in_cat,
+#     #             }
+#     #         }
+#     #     }
+#     # }
+
+
