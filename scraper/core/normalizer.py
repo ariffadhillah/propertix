@@ -258,6 +258,30 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def map_asset_class(property_type: str) -> str:
+    if property_type in ("villa", "apartment", "townhouse"):
+        return "residential"
+    if property_type == "land":
+        return "land"
+    if property_type in ("hotel", "resort"):
+        return "hospitality"
+    if property_type in ("office", "retail"):
+        return "commercial"
+    return "residential"
+
+def map_property_subtype(property_type: str) -> str:
+    mapping = {
+        "villa": "villa",
+        "apartment": "apartment",
+        "townhouse": "townhouse",
+        "land": "residential_land",
+        "hotel": "hotel",
+        "resort": "resort",
+        "office": "office",
+        "retail": "retail",
+    }
+    return mapping.get(property_type, "villa")
+
 def merge_preview_into_detail(preview: Dict[str, Any], detail: Dict[str, Any]) -> Dict[str, Any]:
     """
     Merge preview fields into detail.
@@ -383,5 +407,7 @@ def finalize_listing(listing: Dict[str, Any]) -> Dict[str, Any]:
     content_hash, media_hash = compute_all_hashes(out)
     out["content_hash"] = content_hash
     out["media_hash"] = media_hash
+    listing["asset_class"] = map_asset_class(listing["property_type"])
+    listing["property_subtype"] = map_property_subtype(listing["property_type"])
 
     return out
