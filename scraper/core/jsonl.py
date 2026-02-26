@@ -2,11 +2,6 @@ from pathlib import Path
 import orjson
 from typing import Any, Dict, Iterable
 
-# run_id = datetime.utcnow().isoformat()
-
-# "ScrapeRunId": run_id,
-# "ScrapedAt": now_iso,
-# "SourceKey": "bali-home-immo"
 
 def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)

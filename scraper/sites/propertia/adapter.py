@@ -10,7 +10,7 @@ from .detail_page import parse_detail_page
 
 
 class BaliHomeImmoAdapter:
-    source_key = "bali-home-immo"
+    source_key = "propertia"
 
     def __init__(self):
         # run id untuk 1 kali run scraping

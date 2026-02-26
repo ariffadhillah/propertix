@@ -1,421 +1,210 @@
-# from __future__ import annotations
-
-# import hashlib
-# import json
-# import re
-# from typing import Any, Dict, List, Optional, Tuple
-
-# # Field-field yang JANGAN ikut hashing (karena berubah tiap run / noisy)
-# NON_HASH_KEYS = {
-#     "raw",
-#     "reso",
-#     "content_hash",
-#     "first_seen_at",
-#     "last_seen_at",
-#     "scrape_run_id",
-#     "scraped_at",
-# }
-
-# _WS_RE = re.compile(r"\s+")
-
-
-# def _norm_str(s: Any) -> Optional[str]:
-#     if s is None:
-#         return None
-#     if not isinstance(s, str):
-#         s = str(s)
-#     s = s.strip()
-#     if not s:
-#         return None
-#     # rapikan whitespace biar stabil
-#     s = _WS_RE.sub(" ", s)
-#     return s
-
-
-# def _round_float(x: Any, ndigits: int = 6) -> Optional[float]:
-#     try:
-#         if x is None:
-#             return None
-#         return round(float(x), ndigits)
-#     except Exception:
-#         return None
-
-
-# def _uniq_sorted_str_list(xs: Any) -> List[str]:
-#     if not xs or not isinstance(xs, list):
-#         return []
-#     out = []
-#     seen = set()
-#     for v in xs:
-#         s = _norm_str(v)
-#         if not s:
-#             continue
-#         if s in seen:
-#             continue
-#         seen.add(s)
-#         out.append(s)
-#     out.sort()
-#     return out
-
-
-# def _normalize_prices(prices: Any) -> List[Dict[str, Any]]:
-#     """
-#     prices internal: [{currency, amount, period}, ...]
-#     buat stabil: normalisasi + sort
-#     """
-#     if not prices or not isinstance(prices, list):
-#         return []
-
-#     out: List[Dict[str, Any]] = []
-#     for p in prices:
-#         if not isinstance(p, dict):
-#             continue
-#         currency = _norm_str(p.get("currency")) or None
-#         period = _norm_str(p.get("period")) or None
-#         amount = _round_float(p.get("amount"), 2)
-#         if amount is None:
-#             continue
-#         out.append({"currency": currency, "amount": amount, "period": period})
-
-#     out.sort(key=lambda d: (d.get("period") or "", d.get("currency") or "", d.get("amount") or 0))
-#     return out
-
-
-# def canonical_for_hash(listing: Dict[str, Any]) -> Dict[str, Any]:
-#     """
-#     Ambil subset field yang dianggap 'meaningful change' untuk incremental.
-#     Ini yang dipakai buat compute_content_hash.
-#     """
-
-#     loc = listing.get("location") or {}
-#     if not isinstance(loc, dict):
-#         loc = {}
-
-#     primary_price = listing.get("price") or {}
-#     if not isinstance(primary_price, dict):
-#         primary_price = {}
-
-#     canonical = {
-#         # identity-ish
-#         "source": _norm_str(listing.get("source")),
-#         "source_listing_id": _norm_str(listing.get("source_listing_id")),
-#         "source_url": _norm_str(listing.get("source_url")),
-
-#         # classification
-#         "intent": _norm_str(listing.get("intent")),
-#         "property_type": _norm_str(listing.get("property_type")),
-#         "tenure": _norm_str(listing.get("tenure")),
-#         "rent_period": _norm_str(listing.get("rent_period")),
-
-#         # text
-#         "title": _norm_str(listing.get("title")),
-#         "description": _norm_str(listing.get("description")),
-
-#         # sizes
-#         "land_size_sqm": _round_float(listing.get("land_size_sqm"), 3),
-#         "building_size_sqm": _round_float(listing.get("building_size_sqm"), 3),
-
-#         # rooms
-#         "bedrooms": _round_float(listing.get("bedrooms"), 1),
-#         "bathrooms": _round_float(listing.get("bathrooms"), 1),
-
-#         # geo
-#         "location": {
-#             "area": _norm_str(loc.get("area")),
-#             "sub_area": _norm_str(loc.get("sub_area")),
-#             "latitude": _round_float(loc.get("latitude"), 7),
-#             "longitude": _round_float(loc.get("longitude"), 7),
-#         },
-
-#         # pricing
-#         "price": {
-#             "currency": _norm_str(primary_price.get("currency")),
-#             "amount": _round_float(primary_price.get("amount"), 2),
-#             "period": _norm_str(primary_price.get("period")),
-#         },
-#         "prices": _normalize_prices(listing.get("prices")),
-
-#         # media
-#         "images": _uniq_sorted_str_list(listing.get("images")),
-#     }
-
-#     # drop None recursively biar payload ringkas dan stabil
-#     return _drop_nones(canonical)
-
-
-# def _drop_nones(obj: Any) -> Any:
-#     if isinstance(obj, dict):
-#         out = {}
-#         for k, v in obj.items():
-#             v2 = _drop_nones(v)
-#             if v2 is None:
-#                 continue
-#             # skip dict kosong
-#             if isinstance(v2, dict) and not v2:
-#                 continue
-#             # skip list kosong
-#             if isinstance(v2, list) and not v2:
-#                 continue
-#             out[k] = v2
-#         return out
-#     if isinstance(obj, list):
-#         out = []
-#         for v in obj:
-#             v2 = _drop_nones(v)
-#             if v2 is None:
-#                 continue
-#             out.append(v2)
-#         return out
-#     return obj
-
-
-# def compute_content_hash(listing: Dict[str, Any]) -> str:
-#     payload = canonical_for_hash(listing)
-#     blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-#     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
 from __future__ import annotations
 
 import hashlib
 import json
-import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 
-# =========================
-# Normalization helpers
-# =========================
-
-_WS_RE = re.compile(r"\s+")
+def _stable_json(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _norm_str(s: Any) -> Optional[str]:
-    """Normalize strings for hashing: strip, collapse whitespace."""
-    if s is None:
-        return None
-    if not isinstance(s, str):
-        s = str(s)
-    s = s.strip()
-    if not s:
-        return None
-    s = _WS_RE.sub(" ", s)
-    return s
+def stable_hash(obj: Any) -> str:
+    s = _stable_json(obj)
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-def _norm_bool(v: Any) -> Optional[bool]:
-    if v is None:
-        return None
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return bool(v)
-    if isinstance(v, str):
-        t = v.strip().lower()
-        if t in ("true", "yes", "y", "1"):
-            return True
-        if t in ("false", "no", "n", "0"):
-            return False
-    return None
+def sha256_str(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-def _norm_float(v: Any, *, ndigits: int = 6) -> Optional[float]:
-    """Normalize float-ish values to stable float with rounding."""
-    if v is None:
-        return None
-    try:
-        f = float(v)
-    except Exception:
-        return None
-    # Handle NaN/inf
-    if f != f or f in (float("inf"), float("-inf")):
-        return None
-    return round(f, ndigits)
-
-
-def _norm_int(v: Any) -> Optional[int]:
-    if v is None:
-        return None
-    if isinstance(v, bool):
-        return None
-    if isinstance(v, int):
-        return v
-    if isinstance(v, float):
-        return int(v)
-    if isinstance(v, str):
-        t = v.strip()
-        if not t:
-            return None
-        try:
-            return int(float(t))
-        except Exception:
-            return None
-    return None
-
-
-def _drop_nones(obj: Any) -> Any:
+def _drop_nulls(obj: Any) -> Any:
     """
-    Recursively remove None, empty dict, empty list, and empty strings.
-    Ensures canonical JSON for stable hashing.
+    Remove null/empty recursively, deterministic.
+    Drop:
+      - None
+      - "" (after strip)
+      - [] / {}
+    Keep:
+      - 0
+      - False
     """
     if obj is None:
         return None
 
     if isinstance(obj, str):
-        s = _norm_str(obj)
-        return s
-
-    if isinstance(obj, dict):
-        out = {}
-        for k, v in obj.items():
-            if v is None:
-                continue
-            vv = _drop_nones(v)
-            if vv is None:
-                continue
-            # drop empty containers
-            if vv == {} or vv == []:
-                continue
-            out[str(k)] = vv
-        return out if out else None
+        s = obj.strip()
+        return s if s != "" else None
 
     if isinstance(obj, list):
-        out_list = []
-        for v in obj:
-            vv = _drop_nones(v)
-            if vv is None or vv == {} or vv == []:
+        cleaned = []
+        for x in obj:
+            cx = _drop_nulls(x)
+            if cx is None or cx == [] or cx == {}:
                 continue
-            out_list.append(vv)
-        return out_list if out_list else None
+            cleaned.append(cx)
+        return cleaned if cleaned else None
+
+    if isinstance(obj, dict):
+        out: Dict[str, Any] = {}
+        for k, v in obj.items():
+            cv = _drop_nulls(v)
+            if cv is None or cv == [] or cv == {}:
+                continue
+            out[k] = cv
+        return out if out else None
 
     return obj
 
 
-def _stable_json_dumps(obj: Any) -> str:
+def _to_float(x: Any) -> Optional[float]:
+    if x is None:
+        return None
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
+def _to_int(x: Any) -> Optional[int]:
+    if x is None:
+        return None
+    try:
+        return int(float(x))
+    except Exception:
+        return None
+
+
+def compute_media_hash(images: List[str]) -> str:
     """
-    Stable JSON dump: sort_keys + compact separators.
+    Internal: stable hash of image URLs only (sorted, de-duped).
     """
-    return json.dumps(
-        obj,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _sha256_hex(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
-
-
-# =========================
-# Hash input builders
-# =========================
-
-def build_content_fingerprint(listing: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Build a stable 'content fingerprint' dict used for content_hash.
-    IMPORTANT: exclude volatile fields:
-      - raw / reso
-      - timestamps (first_seen_at, last_seen_at)
-      - scrape_run_id, scraped_at
-      - content_hash itself
-      - images (we hash separately in media_hash)
-    """
-    price = listing.get("price") or {}
-    prices = listing.get("prices") or []
-
-    loc = listing.get("location") or {}
-    # location boleh, tapi distabilkan
-    loc_fp = {
-        "area": _norm_str(loc.get("area")),
-        "sub_area": _norm_str(loc.get("sub_area") or loc.get("subArea")),
-        "latitude": _norm_float(loc.get("latitude")),
-        "longitude": _norm_float(loc.get("longitude")),
-    }
-
-    # Normalize prices list → stable sort
-    prices_fp: List[Dict[str, Any]] = []
-    for p in prices if isinstance(prices, list) else []:
-        if not isinstance(p, dict):
+    clean: List[str] = []
+    for u in images or []:
+        if not u:
             continue
-        prices_fp.append({
-            "currency": _norm_str(p.get("currency")),
-            "amount": _norm_float(p.get("amount")),
-            "period": _norm_str(p.get("period")),
-        })
+        u = str(u).strip()
+        if u:
+            clean.append(u)
+    clean = sorted(set(clean))
+    return stable_hash(clean)
 
-    prices_fp.sort(key=lambda x: (x.get("period") or "", x.get("currency") or "", x.get("amount") or 0.0))
 
-    fp = {
-        # identity-ish (source_listing_id + source_url tidak masuk content_hash agar pindah URL/query tidak bikin updated)
-        "title": _norm_str(listing.get("title")),
-        "description": _norm_str(listing.get("description")),
-        "intent": _norm_str(listing.get("intent")),
-        "property_type": _norm_str(listing.get("property_type")),
+def _get_listing_key(listing: Dict[str, Any]) -> Optional[str]:
+    lk = listing.get("listing_key") or listing.get("ListingKey")
+    if isinstance(lk, str) and lk.strip():
+        return lk.strip()
 
-        "bedrooms": _norm_float(listing.get("bedrooms")),
-        "bathrooms": _norm_float(listing.get("bathrooms")),  # kamu pakai float di internal
-        "land_size_sqm": _norm_float(listing.get("land_size_sqm")),
-        "building_size_sqm": _norm_float(listing.get("building_size_sqm")),
+    source = (listing.get("source") or "").strip()
+    sid = (listing.get("source_listing_id") or listing.get("listing_id") or "").strip()
+    if source and sid:
+        return f"{source}:{sid}"
 
-        "location": loc_fp,
+    url = (listing.get("source_url") or listing.get("url") or "").strip()
+    if url:
+        if source:
+            return f"{source}:{sha256_str(url)}"
+        return sha256_str(url)
 
-        "price": {
-            "currency": _norm_str(price.get("currency")),
-            "amount": _norm_float(price.get("amount")),
-            "period": _norm_str(price.get("period")),
-        },
+    return None
 
-        "prices": prices_fp,
 
-        # broker fields (optional; tetap distabilkan)
-        "broker_name": _norm_str(listing.get("broker_name")),
-        "broker_phone": _norm_str(listing.get("broker_phone")),
-        "broker_email": _norm_str(listing.get("broker_email")),
+def build_canonical_hash_input(listing: Dict[str, Any]) -> Dict[str, Any]:
+    lk = _get_listing_key(listing)
+
+    title = listing.get("title")
+    description = listing.get("description")
+
+    price_in = listing.get("price") or {}
+    if not isinstance(price_in, dict):
+        price_in = {}
+    price_obj = {
+        "amount": _to_float(price_in.get("amount")),
+        "currency": price_in.get("currency"),
+        "period": price_in.get("period"),
     }
 
-    # remove None / empties
-    fp = _drop_nones(fp) or {}
-    return fp
+    specs_in = listing.get("specs") or {}
+    if not isinstance(specs_in, dict):
+        specs_in = {}
 
+    bedrooms = specs_in.get("bedrooms", listing.get("bedrooms"))
+    bathrooms = specs_in.get("bathrooms", listing.get("bathrooms"))
+    land_size_sqm = specs_in.get("land_size_sqm", listing.get("land_size_sqm"))
+    building_size_sqm = specs_in.get("building_size_sqm", listing.get("building_size_sqm"))
 
-def build_media_fingerprint(listing: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Separate fingerprint for media (images). This allows you to track media changes
-    without marking listing 'updated' by content_hash.
-    """
-    imgs = listing.get("images") or []
-    urls: List[str] = []
-    if isinstance(imgs, list):
-        for u in imgs:
-            su = _norm_str(u)
-            if su:
-                urls.append(su)
+    specs_obj = {
+        "bedrooms": _to_int(bedrooms),
+        "bathrooms": _to_int(bathrooms),
+        "land_size_sqm": _to_float(land_size_sqm),
+        "building_size_sqm": _to_float(building_size_sqm),
+    }
 
-    # stable unique + sorted
-    urls = sorted(set(urls))
+    loc_in = listing.get("location") or {}
+    if not isinstance(loc_in, dict):
+        loc_in = {}
 
-    fp = {"images": urls}
-    fp = _drop_nones(fp) or {}
-    return fp
+    lat = loc_in.get("lat")
+    lng = loc_in.get("lng")
+    if lat is None:
+        lat = loc_in.get("latitude")
+    if lng is None:
+        lng = loc_in.get("longitude")
 
+    area = loc_in.get("area")
+    if area is None:
+        area = listing.get("area") or listing.get("sub_area")
 
-# =========================
-# Public API
-# =========================
+    location_obj = {
+        "area": area,
+        "lat": _to_float(lat),
+        "lng": _to_float(lng),
+    }
+
+    images_in = listing.get("images") or []
+    if not isinstance(images_in, list):
+        images_in = []
+    images: List[str] = []
+    for u in images_in:
+        if isinstance(u, str) and u.strip():
+            images.append(u.strip())
+    images = sorted(set(images))
+
+    canonical_obj: Dict[str, Any] = {
+        "ListingKey": lk,
+        "title": title,
+        "description": description,
+        "price": price_obj,
+        "specs": specs_obj,
+        "location": location_obj,
+        "images": images,
+    }
+
+    cleaned = _drop_nulls(canonical_obj) or {}
+    return cleaned
+
+def compute_canonical_content_hash(listing: Dict[str, Any]) -> str:
+    cleaned = build_canonical_hash_input(listing)
+    payload = json.dumps(cleaned, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return sha256_str(payload)
 
 def compute_content_hash(listing: Dict[str, Any]) -> str:
-    fp = build_content_fingerprint(listing)
-    return _sha256_hex(_stable_json_dumps(fp))
-
-
-def compute_media_hash(listing: Dict[str, Any]) -> str:
-    fp = build_media_fingerprint(listing)
-    return _sha256_hex(_stable_json_dumps(fp))
-
-
-def compute_all_hashes(listing: Dict[str, Any]) -> Tuple[str, str]:
     """
-    Returns (content_hash, media_hash)
+    Backward-compatible alias:
+    content_hash is aligned to client canonical spec for deterministic ingestion.
     """
-    return compute_content_hash(listing), compute_media_hash(listing)
+    return compute_canonical_content_hash(listing)
+
+def _stable_json(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+def sha256_str(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def compute_raw_payload_hash(raw_payload: Any) -> str:
+    """
+    Hash untuk 'raw.payload' supaya bisa deteksi perubahan raw HTML/JSON juga.
+    Harus deterministic: sort_keys + compact.
+    """
+    payload = _stable_json(raw_payload or {})
+    return sha256_str(payload)
