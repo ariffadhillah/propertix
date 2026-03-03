@@ -105,3 +105,7 @@ TEST full run (tulis ke SQLite + JSONL)
 py -m scripts.cli --start-test bali-home-immo
 Snapshot mode (supaya JSONL selalu ada isinya setiap run)
 py -m scripts.cli --start-test bali-home-immo --mode snapshot
+
+
+<!-- testing one page -->
+<!-- py -m scripts.test_propertia_detail -->

@@ -1,24 +1,34 @@
+# scraper/core/schema.py
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple, Literal
 
-# --- Client enums (source of truth) ---
+
+# ============================================================
+# Client enums (source of truth)
+# ============================================================
+
 AssetClass = Literal["residential", "land", "hospitality", "commercial"]
+
 PropertySubType = Literal[
     # Residential
     "villa", "apartment", "townhouse", "branded_residence",
     # Land
-    "residential_land", "development_land", "agricultural_land",
+    "residential_land", "freehold_land", "leasehold_land", "development_land", "agricultural_land",
     # Hospitality
     "hotel", "villa_complex", "resort",
     # Commercial
     "office", "retail",
 ]
+
 OfferCategory = Literal["sale", "rent", "other"]
 TenureType = Literal["freehold", "leasehold", "unknown"]
 RentPeriod = Literal["night", "week", "month", "year", "unknown"]
 
-# --- Helpers: coercion (normalize to enums) ---
+
+# ============================================================
+# Coercion helpers
+# ============================================================
 
 def coerce_offer_category(v: Any) -> OfferCategory:
     s = (v or "").strip().lower()
@@ -28,6 +38,7 @@ def coerce_offer_category(v: Any) -> OfferCategory:
         return "rent"
     return "other"
 
+
 def coerce_tenure_type(v: Any) -> TenureType:
     s = (v or "").strip().lower()
     if s in ("freehold",):
@@ -35,6 +46,7 @@ def coerce_tenure_type(v: Any) -> TenureType:
     if s in ("leasehold",):
         return "leasehold"
     return "unknown"
+
 
 def coerce_rent_period(v: Any) -> RentPeriod:
     s = (v or "").strip().lower()
@@ -48,17 +60,18 @@ def coerce_rent_period(v: Any) -> RentPeriod:
         return "year"
     return "unknown"
 
+
 def normalize_text_key(s: str) -> str:
     return (s or "").strip().lower().replace("-", "_").replace(" ", "_")
+
 
 def map_subtype_and_asset_class(raw_type: Optional[str]) -> Tuple[AssetClass, PropertySubType]:
     """
     Map raw property type (from URL/selector) into client enums.
 
     IMPORTANT:
-    - raw_type dari BHI biasanya: villa, apartment, land, hotel, resort, office, retail
-    - kalau cuma 'land' (generic) => default ke development_land (MVP) supaya valid enum.
-      (Nanti breadcrumb/label bisa refine jadi residential_land/agricultural_land)
+    - Jika raw_type cuma "land" (generic) => default MVP ke "development_land"
+      agar selalu valid enum.
     """
     t = normalize_text_key(raw_type or "")
 
@@ -75,7 +88,7 @@ def map_subtype_and_asset_class(raw_type: Optional[str]) -> Tuple[AssetClass, Pr
     # Hospitality
     if t in ("hotel",):
         return ("hospitality", "hotel")
-    if t in ("villa_complex", "villa_complexes", "villa_complexe", "villa-complex"):
+    if t in ("villa_complex", "villa_complexes", "villa-complex", "villa_complexe"):
         return ("hospitality", "villa_complex")
     if t in ("resort",):
         return ("hospitality", "resort")
@@ -83,28 +96,37 @@ def map_subtype_and_asset_class(raw_type: Optional[str]) -> Tuple[AssetClass, Pr
     # Commercial
     if t in ("office",):
         return ("commercial", "office")
-    if t in ("retail", "retailil"):
+    if t in ("retail",):
         return ("commercial", "retail")
 
-    # Land
+    # Land (VALID enums only)
     if t in ("residential_land",):
         return ("land", "residential_land")
-    if t in ("development_land", "land"):
+    if t in ("freehold_land",):
+        return ("land", "freehold_land")
+    if t in ("leasehold_land",):
+        return ("land", "leasehold_land")
+    if t in ("development_land", "development"):
         return ("land", "development_land")
-    if t in ("agricultural_land",):
+    if t in ("agricultural_land", "agriculture_land", "farm_land"):
         return ("land", "agricultural_land")
+
+    # Generic land -> MVP default
+    if t in ("land",):
+        return ("land", "development_land")
 
     # Safe fallback (MVP)
     return ("residential", "villa")
 
+
 def ensure_taxonomy_fields(listing: Dict[str, Any]) -> Dict[str, Any]:
     """
     Ensure client fields exist & normalized:
-    offer_category, tenure_type, rent_period, asset_class, property_subtype
+      offer_category, tenure_type, rent_period, asset_class, property_subtype
 
     Legacy fields boleh ada, tapi client fields wajib diisi.
     """
-    # 1) offer_category from legacy intent if missing
+    # offer_category from legacy intent if missing
     if not listing.get("offer_category"):
         listing["offer_category"] = coerce_offer_category(listing.get("intent"))
 
@@ -112,16 +134,23 @@ def ensure_taxonomy_fields(listing: Dict[str, Any]) -> Dict[str, Any]:
     listing["tenure_type"] = coerce_tenure_type(listing.get("tenure_type") or listing.get("tenure"))
     listing["rent_period"] = coerce_rent_period(listing.get("rent_period"))
 
-    # 2) subtype + asset_class from legacy property_type if missing
+    # subtype + asset_class from legacy property_type if missing
     if not listing.get("property_subtype") or not listing.get("asset_class"):
-        asset_class, subtype = map_subtype_and_asset_class(listing.get("property_subtype") or listing.get("property_type"))
+        asset_class, subtype = map_subtype_and_asset_class(
+            listing.get("property_subtype") or listing.get("property_type")
+        )
         listing.setdefault("asset_class", asset_class)
         listing.setdefault("property_subtype", subtype)
 
     return listing
 
 
+# ============================================================
+# Output record template
+# ============================================================
+
 SCHEMA_VERSION = "listings_master_v1"
+
 
 def empty_record() -> dict:
     return {
@@ -136,22 +165,30 @@ def empty_record() -> dict:
             "title": None,
             "description": None,
 
+            # flat primary price fields
             "price_amount": None,
             "price_currency": None,
             "price_period": None,
 
+            # ✅ nested price objects (matches real output)
+            "price": {"currency": None, "amount": None, "period": None},
+            "prices": [],
+
+            # specs
             "bedrooms": None,
             "bathrooms": None,
             "land_size_sqm": None,
             "building_size_sqm": None,
 
+            # location
             "area": None,
+            "sub_area": None,
             "latitude": None,
             "longitude": None,
 
             "images": [],
 
-            # ✅ taxonomy client (ini penting buat API-ready)
+            # taxonomy client
             "offer_category": None,
             "tenure_type": None,
             "rent_period": None,
@@ -165,7 +202,14 @@ def empty_record() -> dict:
                 "broker_email": None,
                 "broker_profile_url": None,
                 "agency_name": None,
-                "contact_links_raw": {"mailto": [], "tel": [], "whatsapp": [], "other": []},
+                "contact_links_raw": {
+                    "mailto": [],
+                    "tel": [],
+                    "whatsapp": [],
+                    "messenger": [],
+                    "form": [],
+                    "other": [],
+                },
             },
         },
 
@@ -175,8 +219,18 @@ def empty_record() -> dict:
                 "title": None,
                 "description": None,
                 "price": {"amount": None, "currency": None, "period": None},
-                "specs": {"bedrooms": None, "bathrooms": None, "land_size_sqm": None, "building_size_sqm": None},
-                "location": {"area": None, "lat": None, "lng": None},
+
+                # ✅ include prices in canonical input
+                "prices": [],
+
+                "specs": {
+                    "bedrooms": None,
+                    "bathrooms": None,
+                    "land_size_sqm": None,
+                    "building_size_sqm": None,
+                },
+
+                "location": {"area": None, "sub_area": None, "lat": None, "lng": None},
                 "images": [],
             },
             "canonical_content_hash": None,

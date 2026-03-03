@@ -1,7 +1,12 @@
+# scraper/core/reso_mapper.py
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+
+# ============================================================
+# Helpers
+# ============================================================
 
 def _period_to_price_unit(period: Optional[str]) -> Optional[str]:
     if not period:
@@ -68,6 +73,9 @@ def _get_listing_key(listing: Dict[str, Any], source_key: str, listing_id: Optio
 
 
 def _extract_primary_price(listing: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Prefer listing["price"] (nested dict). Fallback to flat fields.
+    """
     price = listing.get("price")
     if isinstance(price, dict) and price:
         return price
@@ -79,27 +87,37 @@ def _extract_primary_price(listing: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_prices_list(listing: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Prefer listing["prices"] (list[dict]). Fallback to raw payload.
+    """
     prices = listing.get("prices")
     if isinstance(prices, list) and prices:
         return [p for p in prices if isinstance(p, dict)]
+
     raw = _safe_dict(listing.get("raw"))
     payload = _safe_dict(raw.get("payload"))
     prices2 = payload.get("prices")
     if isinstance(prices2, list) and prices2:
         return [p for p in prices2 if isinstance(p, dict)]
+
     return []
 
 
 def _extract_location(listing: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalizes location: supports either listing.location dict or flat area/sub_area/lat/lng fields.
+    """
     loc = listing.get("location")
     if not isinstance(loc, dict):
         loc = {}
 
+    # area/sub_area
     if not loc.get("area") and listing.get("area"):
         loc["area"] = listing.get("area")
     if not loc.get("sub_area") and listing.get("sub_area"):
         loc["sub_area"] = listing.get("sub_area")
 
+    # lat/lng
     if loc.get("latitude") is None and listing.get("latitude") is not None:
         loc["latitude"] = listing.get("latitude")
     if loc.get("longitude") is None and listing.get("longitude") is not None:
@@ -108,13 +126,46 @@ def _extract_location(listing: Dict[str, Any]) -> Dict[str, Any]:
     return loc
 
 
+def _extract_minimal_rawpayload(listing: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Avoid huge duplication in RESO.RawPayload.
+    Keep only minimal debug + breadcrumb (optional) + url_taxonomy (optional).
+    """
+    raw = _safe_dict(listing.get("raw"))
+    payload = _safe_dict(raw.get("payload"))
+
+    out: Dict[str, Any] = {}
+    dbg = _safe_dict(payload.get("debug"))
+    if dbg:
+        out["debug"] = dbg
+
+    bc = payload.get("breadcrumb")
+    if isinstance(bc, list) and bc:
+        out["breadcrumb"] = bc
+
+    ut = _safe_dict(payload.get("url_taxonomy"))
+    if ut:
+        out["url_taxonomy"] = ut
+
+    # contact often useful for auditing, but still not massive
+    contact = _safe_dict(payload.get("contact"))
+    if contact:
+        out["contact"] = contact
+
+    return out
+
+
+# ============================================================
+# Main mapper
+# ============================================================
+
 def to_reso_listing(listing: Dict[str, Any], source_key: str) -> Dict[str, Any]:
     listing_id = listing.get("source_listing_id")
     listing_key = _get_listing_key(listing, source_key, listing_id)
 
     primary = _safe_dict(_extract_primary_price(listing))
 
-    # IMPORTANT: treat 0 as missing (avoid analytics/comps pollution)
+    # IMPORTANT: treat 0 / negative as missing (avoid pollution)
     amount = _to_float(primary.get("amount")) or _to_float(listing.get("price_amount"))
     if amount is not None and amount <= 0:
         amount = None
@@ -122,6 +173,7 @@ def to_reso_listing(listing: Dict[str, Any], source_key: str) -> Dict[str, Any]:
     currency = (primary.get("currency") if primary.get("currency") else None) or listing.get("price_currency") or "IDR"
     price_unit = _period_to_price_unit(primary.get("period") or listing.get("price_period"))
 
+    # prices list
     prices_all: List[Dict[str, Any]] = []
     for p in _extract_prices_list(listing):
         a = _to_float(p.get("amount"))
@@ -135,6 +187,7 @@ def to_reso_listing(listing: Dict[str, Any], source_key: str) -> Dict[str, Any]:
             }
         )
 
+    # location
     loc = _extract_location(listing)
     lat = _to_float(loc.get("latitude")) or _to_float(listing.get("latitude"))
     lng = _to_float(loc.get("longitude")) or _to_float(listing.get("longitude"))
@@ -143,11 +196,12 @@ def to_reso_listing(listing: Dict[str, Any], source_key: str) -> Dict[str, Any]:
     prop_type = listing.get("property_subtype") or listing.get("property_type")
     prop_type_reso = _title_case_safe(prop_type)
 
-    # timestamps (bridge from runner may inject these)
+    # timestamps
     first_seen = listing.get("first_seen_at") or listing.get("ingestion_first_seen_at")
     last_seen = listing.get("last_seen_at") or listing.get("ingestion_last_seen_at")
 
-    scraped_at = (last_seen or "").replace("+00:00", "")
+    # Keep ISO as-is (with timezone)
+    scraped_at = last_seen or None
 
     out: Dict[str, Any] = {
         "ScrapeRunId": listing.get("scrape_run_id"),
@@ -156,26 +210,38 @@ def to_reso_listing(listing: Dict[str, Any], source_key: str) -> Dict[str, Any]:
         "ListingKey": listing_key,
         "ListingId": listing_id,
         "ListingURL": listing.get("source_url"),
+
         "StandardStatus": _map_standard_status(listing.get("status")),
         "ListingStatus": _title_case_safe(listing.get("status")) or "Unknown",
+
         "ListPrice": amount,
         "Currency": currency,
         "PriceUnit": price_unit,
+
         "PropertyType": prop_type_reso,
+
         "BedroomsTotal": _to_int(listing.get("bedrooms")),
         "BathroomsTotalInteger": _to_int(listing.get("bathrooms")),
         "LivingArea": _to_float(listing.get("building_size_sqm")),
         "LotSizeSquareMeters": _to_float(listing.get("land_size_sqm")),
+
         "Latitude": lat,
         "Longitude": lng,
+
         "City": city,
         "StateOrProvince": "Bali",
         "Country": "Indonesia",
+
         "FirstSeenAt": first_seen,
         "LastSeenAt": last_seen,
+
         "Prices": prices_all,
         "Media": listing.get("images") or [],
-        "RawPayload": listing.get("raw") or {},
+
+        # ✅ minimal raw (no duplication explosion)
+        "RawPayload": _extract_minimal_rawpayload(listing),
+
+        # taxonomy mirrors (helpful downstream)
         "AssetClass": listing.get("asset_class"),
         "PropertySubType": listing.get("property_subtype"),
         "OfferCategory": listing.get("offer_category"),
@@ -188,12 +254,12 @@ def to_reso_listing(listing: Dict[str, Any], source_key: str) -> Dict[str, Any]:
     if listing.get("description"):
         out["Description"] = listing["description"]
 
-    # --- Stage 2 placeholders (wajib ada walau null/kosong) ---
+    # Stage 2 placeholders (required by client)
     out.setdefault("ListAgentKey", None)
     out.setdefault("ListOfficeKey", None)
-    out.setdefault("Member", None)     # atau {} kalau kamu mau object kosong
-    out.setdefault("Office", None)     # atau {} kalau kamu mau object kosong
-    out.setdefault("OpenHouses", [])   # open house tidak relevan untuk BHI
+    out.setdefault("Member", None)
+    out.setdefault("Office", None)
+    out.setdefault("OpenHouses", [])
 
     return out
 

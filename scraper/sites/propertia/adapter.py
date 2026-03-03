@@ -9,7 +9,7 @@ from .crawl import iter_list_items
 from .detail_page import parse_detail_page
 
 
-class BaliHomeImmoAdapter:
+class PropertiaAdapter:
     source_key = "propertia"
 
     def __init__(self):
