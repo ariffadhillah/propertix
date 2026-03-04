@@ -927,6 +927,100 @@ def _extract_tenure_details_from_raw(raw_payload: Dict[str, Any]) -> Dict[str, A
     return out
 
 
+def _parse_land_size_from_text(txt: Any) -> Dict[str, Any]:
+    """
+    Parse land size string like:
+      "6.5 Are" -> raw_value=6.5, raw_unit="are", sqm=650
+      "145 m²"  -> raw_value=145, raw_unit="sqm", sqm=145
+      "145 m2"  -> raw_value=145, raw_unit="m2",  sqm=145
+      "0.25 hectare" -> raw_value=0.25, raw_unit="hectare", sqm=2500
+    Returns dict keys (some may be None):
+      { "raw_value": float|None, "raw_unit": str|None, "sqm": int|None, "conversion_note": str|None }
+    """
+    out = {"raw_value": None, "raw_unit": None, "sqm": None, "conversion_note": None}
+    if not isinstance(txt, str):
+        return out
+
+    s = txt.strip().lower()
+    if not s:
+        return out
+
+    # normalize decimal comma
+    s = s.replace(",", ".")
+    m = re.search(r"(\d+(?:\.\d+)?)\s*([a-z²0-9]+)", s)
+    if not m:
+        return out
+
+    try:
+        val = float(m.group(1))
+    except Exception:
+        return out
+
+    unit = m.group(2).strip()
+
+    # normalize unit tokens
+    # allow: m², m2, sqm, are, ares, ha, hectare, hectares, sqft
+    if unit in ("m²", "m2", "sqm"):
+        out["raw_value"] = val
+        out["raw_unit"] = "sqm" if unit != "m2" else "m2"
+        out["sqm"] = int(round(val))
+        return out
+
+    if unit in ("are", "ares", "a"):
+        out["raw_value"] = val
+        out["raw_unit"] = "are"
+        sqm = val * 100.0
+        out["sqm"] = int(round(sqm))
+        out["conversion_note"] = f"{val} are * 100 = {out['sqm']} sqm"
+        return out
+
+    if unit in ("ha", "hectare", "hectares"):
+        out["raw_value"] = val
+        out["raw_unit"] = "hectare"
+        sqm = val * 10000.0
+        out["sqm"] = int(round(sqm))
+        out["conversion_note"] = f"{val} hectare * 10000 = {out['sqm']} sqm"
+        return out
+
+    # unknown unit -> still keep raw
+    out["raw_value"] = val
+    out["raw_unit"] = unit
+    return out
+
+
+def _extract_land_size_from_raw(raw_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Look for land size text inside raw payload site_sections.general_information.<category>.
+    We prefer leasehold block if exists, else scan any general_information block.
+    """
+    ss = raw_payload.get("site_sections")
+    if not isinstance(ss, dict):
+        return {"raw_value": None, "raw_unit": None, "sqm": None, "conversion_note": None}
+
+    gi = ss.get("general_information")
+    if not isinstance(gi, dict):
+        return {"raw_value": None, "raw_unit": None, "sqm": None, "conversion_note": None}
+
+    # 1) prefer leasehold branch (Propertia sample)
+    leasehold = gi.get("leasehold")
+    if isinstance(leasehold, dict):
+        txt = leasehold.get("land size")
+        parsed = _parse_land_size_from_text(txt)
+        if parsed.get("sqm") is not None or parsed.get("raw_value") is not None:
+            return parsed
+
+    # 2) BHI style: general_information has multiple categories
+    for _, block in gi.items():
+        if not isinstance(block, dict):
+            continue
+        txt = block.get("land size")
+        parsed = _parse_land_size_from_text(txt)
+        if parsed.get("sqm") is not None or parsed.get("raw_value") is not None:
+            return parsed
+
+    return {"raw_value": None, "raw_unit": None, "sqm": None, "conversion_note": None}
+
+
 def _auto_fill_geo_signals(location: Dict[str, Any]) -> None:
     """
     If lat/lng exist but geo_source/confidence unknown -> assume it came from page map.
@@ -1035,6 +1129,8 @@ def to_v3_record(rec: Dict[str, Any]) -> Dict[str, Any]:
 
     # --- sizes
     land_size_sqm = _to_int(_get_spec(listing_in, "land_size_sqm"))
+
+    # default (current behavior)
     land_size = {
         "sqm": land_size_sqm,
         "raw_value": land_size_sqm,
@@ -1042,21 +1138,25 @@ def to_v3_record(rec: Dict[str, Any]) -> Dict[str, Any]:
         "conversion_note": None,
     }
 
+    # enrich from raw payload if it has a better "raw" representation (e.g. "6.5 Are")
+    raw_land = _extract_land_size_from_raw(raw_payload)
+
+    # Only override raw_value/raw_unit/conversion_note when raw provides unit info
+    # Keep sqm from listing if it already exists; else use raw computed sqm.
+    ru = (raw_land.get("raw_unit") or "").lower().strip()
+    if (
+        raw_land.get("raw_unit") is not None
+        and raw_land.get("raw_value") is not None
+        and ru not in ("sqm", "m2")
+    ):
+        land_size["raw_value"] = raw_land.get("raw_value")
+        land_size["raw_unit"] = raw_land.get("raw_unit")
+        land_size["conversion_note"] = raw_land.get("conversion_note")
+
+        if land_size.get("sqm") is None and raw_land.get("sqm") is not None:
+            land_size["sqm"] = raw_land.get("sqm")
+
     building_size_sqm = _to_int(_get_spec(listing_in, "building_size_sqm"))
-
-    # --- tenure
-    # tenure_type = listing_in.get("tenure_type")
-    # lease_years = _to_int(listing_in.get("lease_years"))
-    # if (lease_years is None) and (str(tenure_type or "").lower().strip() == "leasehold"):
-    #     lease_years = _parse_lease_years_from_raw(raw_payload)
-
-    # tenure = {
-    #     "tenure_type": tenure_type,
-    #     "lease_years": lease_years,
-    #     "lease_expiry_year": _to_int(listing_in.get("lease_expiry_year")),
-    #     "extension_option": listing_in.get("extension_option"),
-    #     "extension_terms_raw": listing_in.get("extension_terms_raw"),
-    # }
 
     # --- tenure
     tenure_type = listing_in.get("tenure_type")
