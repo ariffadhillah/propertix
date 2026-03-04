@@ -839,6 +839,94 @@ def _parse_lease_years_from_raw(raw_payload: Dict[str, Any]) -> Optional[int]:
         return None
 
 
+def _parse_year_from_text(x: Any) -> Optional[int]:
+    if not isinstance(x, str):
+        return None
+    m = re.search(r"\b(19|20)\d{2}\b", x)
+    if not m:
+        return None
+    try:
+        return int(m.group(0))
+    except Exception:
+        return None
+
+
+def _parse_bool_from_extension_text(x: Any) -> Optional[bool]:
+    """
+    Map extension text -> bool:
+      'Available', 'Yes', 'Possible' -> True
+      'No', 'Not available', 'None' -> False
+      else -> None
+    """
+    if not isinstance(x, str):
+        return None
+    s = x.strip().lower()
+    if not s:
+        return None
+
+    true_markers = ("available", "yes", "possible", "option", "extendable")
+    false_markers = ("no", "not available", "unavailable", "none", "n/a")
+
+    if any(t in s for t in true_markers):
+        return True
+    if any(t in s for t in false_markers):
+        return False
+    return None
+
+
+def _extract_tenure_details_from_raw(raw_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Unify tenure enrichment for BHI + Propertia:
+    - Propertia keys (from your sample):
+        general_information.leasehold["lease years"] = "17"
+        general_information.leasehold["end of lease"] = "October 2043"
+        general_information.leasehold["extension"] = "Available"
+    - BHI keys:
+        general_information.<cat>["leasehold period"] = "22 year(s)"
+    Returns dict with possibly:
+      lease_years, lease_expiry_year, extension_option, extension_terms_raw
+    """
+    out: Dict[str, Any] = {
+        "lease_years": None,
+        "lease_expiry_year": None,
+        "extension_option": None,
+        "extension_terms_raw": None,
+    }
+
+    ss = raw_payload.get("site_sections")
+    if not isinstance(ss, dict):
+        return out
+
+    gi = ss.get("general_information")
+    if not isinstance(gi, dict):
+        return out
+
+    leasehold = gi.get("leasehold")
+    if not isinstance(leasehold, dict):
+        leasehold = {}
+
+    # --- Propertia style
+    # lease years
+    ly = leasehold.get("lease years")
+    out["lease_years"] = _to_int(ly) if ly is not None else None
+
+    # end of lease -> year
+    eol = leasehold.get("end of lease")
+    out["lease_expiry_year"] = _parse_year_from_text(eol)
+
+    # extension
+    ext = leasehold.get("extension")
+    ext_txt = _clean_str(ext) if isinstance(ext, str) else None
+    out["extension_terms_raw"] = ext_txt
+    out["extension_option"] = _parse_bool_from_extension_text(ext_txt)
+
+    # --- BHI fallback (only if lease_years still empty)
+    if out["lease_years"] is None:
+        out["lease_years"] = _parse_lease_years_from_raw(raw_payload)
+
+    return out
+
+
 def _auto_fill_geo_signals(location: Dict[str, Any]) -> None:
     """
     If lat/lng exist but geo_source/confidence unknown -> assume it came from page map.
@@ -957,17 +1045,47 @@ def to_v3_record(rec: Dict[str, Any]) -> Dict[str, Any]:
     building_size_sqm = _to_int(_get_spec(listing_in, "building_size_sqm"))
 
     # --- tenure
+    # tenure_type = listing_in.get("tenure_type")
+    # lease_years = _to_int(listing_in.get("lease_years"))
+    # if (lease_years is None) and (str(tenure_type or "").lower().strip() == "leasehold"):
+    #     lease_years = _parse_lease_years_from_raw(raw_payload)
+
+    # tenure = {
+    #     "tenure_type": tenure_type,
+    #     "lease_years": lease_years,
+    #     "lease_expiry_year": _to_int(listing_in.get("lease_expiry_year")),
+    #     "extension_option": listing_in.get("extension_option"),
+    #     "extension_terms_raw": listing_in.get("extension_terms_raw"),
+    # }
+
+    # --- tenure
     tenure_type = listing_in.get("tenure_type")
+
+    # keep explicit listing fields if already present
     lease_years = _to_int(listing_in.get("lease_years"))
-    if (lease_years is None) and (str(tenure_type or "").lower().strip() == "leasehold"):
-        lease_years = _parse_lease_years_from_raw(raw_payload)
+    lease_expiry_year = _to_int(listing_in.get("lease_expiry_year"))
+    extension_option = listing_in.get("extension_option")
+    extension_terms_raw = listing_in.get("extension_terms_raw")
+
+    # ONLY enrich from raw when tenure_type == leasehold and fields still empty
+    if str(tenure_type or "").lower().strip() == "leasehold":
+        raw_tenure = _extract_tenure_details_from_raw(raw_payload)
+
+        if lease_years is None:
+            lease_years = raw_tenure.get("lease_years")
+        if lease_expiry_year is None:
+            lease_expiry_year = raw_tenure.get("lease_expiry_year")
+        if extension_option is None:
+            extension_option = raw_tenure.get("extension_option")
+        if extension_terms_raw is None:
+            extension_terms_raw = raw_tenure.get("extension_terms_raw")
 
     tenure = {
         "tenure_type": tenure_type,
         "lease_years": lease_years,
-        "lease_expiry_year": _to_int(listing_in.get("lease_expiry_year")),
-        "extension_option": listing_in.get("extension_option"),
-        "extension_terms_raw": listing_in.get("extension_terms_raw"),
+        "lease_expiry_year": lease_expiry_year,
+        "extension_option": extension_option,
+        "extension_terms_raw": extension_terms_raw,
     }
 
     # --- status mapping
